@@ -1,46 +1,37 @@
-
 from fastapi import FastAPI
-from pymongo import MongoClient
-from typing import List
-from pydantic import BaseModel
-from fastapi.staticfiles import StaticFiles
+import requests
+from config import API_KEY
+from database import get_db_connection
 
-# MongoDB 연결
-client = MongoClient("mongodb://localhost:27017/")  # MongoDB 연결
-db = client["news_database"]  # 새로운 데이터베이스 이름 'news'
-collection = db["yahoo_news"]  # 새로운 컬렉션 이름 'yahoo'
-
-# FastAPI 인스턴스 생성
 app = FastAPI()
 
-# 뉴스 데이터 모델 (응답 포맷)
-class NewsItem(BaseModel):
-    title: str
-    link: str
-    date: str
-    content: str
-    image: str
+FINNHUB_URL = "https://finnhub.io/api/v1/quote"
 
-@app.get("/check_connection")
-def check_connection():
-    try:
-        # MongoDB에서 데이터베이스 목록을 가져오는 쿼리
-        databases = client.list_database_names()
-        return {"message": f"Connected to MongoDB. Databases: {databases}"}
-    except Exception as e:
-        return {"message": f"Failed to connect to MongoDB. Error: {str(e)}"}
+@app.get("/fetch_stock/{symbol}")
+def fetch_stock(symbol: str):
+    params = {"symbol": symbol, "token": API_KEY}
+    response = requests.get(FINNHUB_URL, params=params)
+    
+    if response.status_code != 200:
+        return {"error": "Failed to fetch stock data"}
+    
+    data = response.json()
+    
+    # MySQL에 데이터 저장
+    conn = get_db_connection()
+    cursor = conn.cursor()
 
-# 뉴스 목록 조회 API
-@app.get("/news", response_model=List[NewsItem])
-def get_news():
-    news_items = list(collection.find({}, {"_id": 0}))  # MongoDB에서 뉴스 가져오기
-    return news_items
+    sql = """
+    INSERT INTO stock_data (symbol, current_price, price_change, percent_change, 
+                            high_price, low_price, open_price, prev_close, timestamp)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+    """
+    values = (symbol, data["c"], data["d"], data["dp"], data["h"], 
+              data["l"], data["o"], data["pc"], data["t"])
 
-# 크롤러 실행 API
-@app.get("/crawl")
-def crawl_news():
-    from crawler import fetch_yahoo_news, save_to_mongo
-
-    news_items = fetch_yahoo_news()  # 뉴스 크롤링
-    save_to_mongo(news_items)  # MongoDB에 저장
-    return {"message": f"{len(news_items)} articles crawled and saved."}
+    cursor.execute(sql, values)
+    conn.commit()
+    cursor.close()
+    conn.close()
+    
+    return {"message": "Stock data saved", "data": data}
